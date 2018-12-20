@@ -1,0 +1,687 @@
+---
+title: "Analyzing Big Data II - Final Group Work"
+author: "Team A - Debarati Mazumdar, Christy Chen, Danni Hao"
+date: "May 4, 2018"
+output: word_document
+subtitle: Airbnb Pricing Strategy
+---
+
+# Part A. Executive summary
+
+The final  project asked us to choose we were given 4 perspectives to choose from and as a team we decided to analyse the Airbnb perspective for property listing. 
+The project aims at analysing the Airbnb perspective of already listed properties and study their pricing, length of stay and how to get good recommendations to get an understanding on how price behaves in presence of various factors.
+We decided to develop a pricing model which aims at predicting the price per night for the new listers basis the most crucial factors (like - Accommodates, Review means , etc.)
+
+We decided to study the pricing for each airbnb to analyze the current prices per night. The problem statement in this case will be to understand what factors affect the price of a house and by how much. For example, if positive reviews play a role in the pricing then by how much factor is it correlated to the price. Similarly the challenge in this Pricing model will be to come up with a model which predicts price for each airbnb in Boston correctly and accurately taking into fact the most important factors.
+Our best model had some capabilities to forecast the price of airbnb per night and performed very well in the first price category ranging from zero to eighty dollars. We found that Room Type, Neighbourhood and Accommodates were the most three important factors in pricing decision. However, the scores of reviews did not contribute a lot to our model and that was totally opposite to our expectation. This was a surprise as reviews were studied in two data sets (listings and reviews data and were scored). 
+
+
+# Part B.Introduction
+
+To be a little creative, we merge three datasets: listings.csv, reviews.csv and licenses.csv. 
+(The license data is about restaurants around the location of the listed property and how it can affect the price.)
+We first studied variable correlations and drew a price map. We then added columns like number of amenities, price_category  and restaurants and deleted other columns we believe are unimportant. We first studied variable correlations, and then added columns like number of amenities, price_category and restaurants and deleted other columns we believe are unimportant.
+
+After doing previous steps, we still found our dataset is very large and inefficient. So we used unsupervised learning to reduce dimensions. By cleaning, extracting useful data and merging all data we need together, we got our own data ready for modeling. We developed four models trying to explain pricing reasonings: pruned trees, boosted trees, bagged trees and random forest.
+
+
+# Part C. Data sources and merging data
+
+```{r,echo=FALSE, message=FALSE,warning=FALSE,error=FALSE}
+
+library(tidyverse)
+library(dplyr)
+library(rpart)
+library(adabag)
+library(rpart.plot)
+library(caret)
+library(gbm)
+library(tidyverse)
+library(GGally)
+library(ggplot2)
+library(ggmap)
+library(textcat)
+library(gridExtra)
+library(randomForest)
+
+```
+
+
+* First dataset: “listings.csv” from Airbnb
+
+In the very first step, we looked at the “listings.csv” file and selected columns that are important to us. In this data set, we got basic information about an airbnb, like price per night, location, amenities and accommodates. This dataset also has the information of review scores.
+
+As we started with the Listings data - which had over 90 variables, we have done following steps to clean data:
+
+Step 1 - Reduce variables which would not be factors related for the pricing model 
+
+Step 2 - Price as a variable had a huge range of values , hence we decided to create a new  column as Price_Category which had 6 buckets for the Price 
+
+Step 3 - Data in the old reviews.csv was taken and the reviews were given scores ( discussed in the report )
+
+
+```{r,message=FALSE,warning=FALSE,error=FALSE}
+# read data
+# Cleaned Listing dataframe
+listing.orig <- read.csv("C:/Users/danni/Desktop/My R Work/BUS212/Data/listings.csv")
+
+listing.df <- listing.orig[,c(1,40,44,49,50,52,53,54,55,56,59,61,68,69,72,73,74,75,
+                              80,81,82,83,84,85,86,92)]
+
+# change the column name
+colnames(listing.df)[1] <- "property_id"
+
+```
+
+
+
+* Second dataset: “reviews.csv” from Airbnb
+Then, we investigated the “review.csv” and extract two value variables: average scores and the frequency of reviews of each airbnb.
+
+The “review.df” dataset includes reviews of 3986 airbnb, close to the number of airbnb in “listings.cvs”. Following what we did in Case 4, we used AFINN lexicon to summarize the score of each airbnb, and then named that average score as “avg_score”.  Additionally, the number of reviews for each airbnb is also a key criteria for customers. The more times an airbnb has been commented, the more accuracy the sentiment would be. We counted how many times an airbnb has been reviewed and named that column as “review_frequency”.
+
+Although the “listings.csv” also provide the variable of “number of reviews” and a series of “review_scores” , our group thought that some customers perhaps rate the airbnb carelessly when they choose a number from zero to ten or to a hundred. The information from “review.df” will be better.
+
+
+```{r, warning=FALSE,message=FALSE,echo=FALSE}
+Sys.setenv(JAVA_HOME = "C:/Program Files/Java/jdk-10/")
+system("java -version")
+
+library(tm)
+library(tidytext)
+library(RWeka)
+library(tidyverse)
+library(ggraph)
+library(qdap)
+library(plotrix)
+library(wordcloud)
+```
+
+
+
+```{r, error=FALSE,message=FALSE,warning=FALSE}
+# read review data
+review.orig <- read.csv("C:/Users/danni/Desktop/My R Work/BUS212/Data/reviews.csv")
+
+# extract the number of properties in reviews
+dim(table(review.orig$listing_id))
+
+# extract the id of properties in listing.df
+listingid<- as.vector(listing.df$property_id)
+
+
+# extract reviews
+review.df <- review.orig[, -c(3,4,5)] %>%
+  filter(listing_id %in% listingid)
+
+# rename the column for consistency
+
+colnames(review.df) <- c("property_id", "id", "comments")
+
+# remove stopwords
+data("stop_words")
+stop_words[nrow(stop_words) + 1,] = c("boston"," ")
+stop_words[nrow(stop_words) + 1,] = c("airbnb"," ")
+
+tidy_words <- review.df[, 2:3] %>%
+  mutate(comments=as.character(comments)) %>%
+  unnest_tokens(word, comments) %>%
+  group_by(id) %>%
+  mutate(original_word_order = seq_along(word)) %>%
+  anti_join(stop_words)
+
+# get "AFINN" lexicon
+afinn <- get_sentiments("afinn")
+rev.afinn <- tidy_words %>%
+  inner_join(afinn)
+
+# create review polarity by using the sum of scores by each comment
+rev.score <- rev.afinn %>%
+  group_by(id) %>%
+  summarize(total_score = sum(score))
+
+
+# inner join with review
+review.df <- review.df %>%
+  inner_join(rev.score)
+
+
+# summarize the review.df
+review.score.df <- review.df %>%
+  group_by(property_id) %>%
+  summarize(mean_score = mean(total_score))
+
+
+# count the review
+review.count.df <- review.df %>%
+    count(property_id)  
+
+colnames(review.count.df) <- c("property_id", "review_frequency")
+
+
+listing.df <- review.score.df %>%
+  inner_join(review.count.df) %>%
+  inner_join(listing.df)
+  
+  
+```
+
+
+
+
+* Third dataset (external data): licenses.csv from “https://data.boston.gov/dataset”
+
+Beyond the dataset from Airbnb, we wanted to explore if life convenience influence the price. So, we found an external dataset about the number of active food establishment licenses. 
+
+(Data retrieved from https://data.boston.gov/dataset/active-food-establishment-licenses/resource/f1e13724-284d-478c-b8bc-ef042aa5b70b)
+
+Number of active food establishment licenses is a useful tool to measure the number of restaurant in certain zip code area.
+We will count the number active food establishment licenses in each zip code and join this dataset into our listing.df. This variable was named as “restaurants”. In addition to the life convenience, the prosperity of the area could also be approximated by this variable. Restaurants tends to cluster in the popular area and around attractions, for example the Newbury street, Prudential Plaza and Allston.
+
+
+
+```{r, error=FALSE,message=FALSE,warning=FALSE}
+
+# food.orig <- read.csv("C:/Users/chris/Desktop/BigDataII/Final Project/dataset/licenses.csv")
+food.orig <- read.csv("C:/Users/danni/Desktop/My R Work/BUS212/Data/licenses.csv")
+food.df <- food.orig[,c(1,6)] 
+summary(food.df)
+
+zip.df <- data.frame(table(food.df$ZIP))
+dim(zip.df)
+colnames(zip.df) <-c("zipcode","Restaurants")
+
+
+#Join zip.df and listings.df
+listing.df <- inner_join(listing.df,zip.df)
+
+# remove all the missing
+listing.df <- na.omit(listing.df)
+
+```
+
+Until now, we have got all datasets we need in this research. Since we have a large dataset and observations with missing value are a relatively small, our group decided to omit the missing values. The new dataset includes 3704 observations and 13 variables.
+
+
+
+
+
+# Part D. Data exploration and initial investigation
+
+* Step 1. Study the target variable
+
+First, we need to study the distribution and variation of target variable - price
+
+* 1. Create price categories for price in listing.df
+
+Instead of using price, we decide to create price categories and to use price category as our  final target variable. We chose price_category because in the perspective of airbnb, we want to provide pricing strategy and figure out what factor influences price. Compared to price, price category tells us a range of price and sounds more reasonable in predicting listing prices.
+
+To decide each price range, we first looked at price distribution. We removed outliers with price over $500, where the variation of price is pretty small, and then drew a histogram showing the price dynamic. According to the histogram, we decided to separate price ranges from 0-80, 80-120, 120-160, 160-200, 200-300 and 300-500.  The price category of 0-80 have most listings, while other price categories have balanced number of listings.
+
+
+```{r,message=FALSE,error=FALSE,warning=FALSE}
+# study the distribution of the price
+ggplot(listing.df, aes(price))+
+  geom_histogram(bin=10)
+
+dim(listing.df[which(listing.df$price <500), ])
+
+listing.df <- listing.df[which(listing.df$price <500), ]
+
+ggplot(listing.df, aes(price))+
+  geom_histogram(bins = 10)
+
+```
+
+
+
+
+
+```{r, error=FALSE,message=FALSE,warning=FALSE}
+listing.df$price <- as.numeric(listing.df$price)
+
+listing.df <- listing.df %>% 
+  mutate(price_category=cut(price, breaks=c(-Inf, 80, 120, 160,200,300,Inf), labels=c(1,2,3,4,5,6)))
+
+summary(listing.df$price_category)
+
+listing.df$price_category <- as.numeric(listing.df$price_category)
+
+
+
+
+```
+
+
+
+* 2. Study the variation of prices in different location
+
+```{r, message=FALSE,warning=FALSE, error=FALSE}
+# Price Map
+table(listing.df$neighbourhood_cleansed)
+
+bostonmap <- qmap("boston", zoom = 12)
+bostonmap + 
+  geom_point(aes(x = longitude, y = latitude, color = price_category), data = listing.df)+
+  ggtitle("Airbnb price by location")+
+  scale_color_continuous(labels =c("0-$80", "$80-$120","$120-$160","$160-$200","$200-$300","$300-$500"))
+  
+
+# price boxplot by differenct neighborhood
+ggplot(data=listing.df, aes(y=price_category,x=neighbourhood_cleansed))+
+  geom_boxplot()+
+  coord_flip()+
+  ggtitle("Aribnb price by Neighbourhood")+
+  ylab("price category")+
+  xlab("neighbourhood")
+
+# drop longitude and latitude
+listing.df <- listing.df[, !colnames(listing.df) %in% c("longitude","latitude")]
+```
+
+
+From the map with different price categories above, we could clearly observe the variation of prices. In the center of Boston city, the prices are significantly higher than those outside downtown. Location should be an important factor in our pricing strategy.
+
+The boxplot of price category by neighbourhood indicates strong price variation among different location. Our group decided to include neighbourhood variable in our model instead of longitude and latitude data, because the former is cleaner and easier to explain.
+
+
+
+* 3. Study the correlation between price and categorical data
+
+```{r}
+
+p1 <- ggplot(listing.df, aes(x =listing.df$cancellation_policy , y = listing.df$price_category , color= "darkred"))+
+  geom_boxplot()+
+  xlab ("Cancellation Policy")+
+  ylab ("")+
+  coord_flip()
+
+p2 <- ggplot(listing.df, aes(x =listing.df$room_type , y = listing.df$price_category , color= "darkred"))+
+  geom_boxplot()+
+  xlab ("Room Type")+
+  ylab ("")+
+  coord_flip()
+
+
+p3 <- ggplot(listing.df, aes(x =listing.df$property_type , y = listing.df$price_category , color= "darkred"))+
+  geom_boxplot()+
+  xlab ("Property Type")+
+  ylab ("")+
+  coord_flip()
+
+
+grid.arrange(p1,p2,p3, bottom = "Price category for Aribnb")
+```
+
+The boxplots above showed how price category was correlated with the three categorical variables in our dataset - “Cancellation Policy”, “Room Type” and “Property Type”. We decided to include all these three variables because prices showed wide variation between different levels of categories. And after running several models, we also found that all these three variables contributed largely to the model.
+
+With cancellation we observe that with more strict rules the price is restricted in a range but with flexible rules it has a wider price range.
+
+Room type - entire home / apartment is priced higher since this is an expensive style of renting as compared to just a room or a shared room.
+
+Property type has a varied price range of various type like villas have the widest range and apartments have a more restricted range of price.
+
+
+
+* Step 2. Study the input variables
+
+* 1. Summarize the amenities
+
+For amenities in listings.csv, we decided to count the number of amenities in each airbnb representing the convenience of living inside an airbnb.
+
+For the models we ran at the beginning, we found it was really hard to predict the price level of an airbnb in the range from 300 to 500. Then we looked back at the listing.df and found that some expensive houses had really “fancy” amenities, for example gym, balcony, bbq and garden. Those factors would be helpful to differentiate expensive houses from others. Therefore, we did text mining with the amenities and found the most common amenities. After screening all the amenities, our group made a list of twenty amenities consisted of both required devices and fancy ones as mentioned before. Those are - ("detector", "internet","dryer","tv","essentials", "conditioning","extinguisher","pets", "elevator","parking","microwave", "coffee","refrigerator","dishwasher","gym","breakfast","balcony","pool","bbq","garden").
+Then we count how much amenities an airbnb have in that list. Our assumption was a higher number of amenities can indicate a better airbnb pricing.
+
+
+```{r,warning=FALSE,message=FALSE,error=FALSE}
+#count amendities
+amenities.df <- listing.df[,colnames(listing.df) %in% c("property_id", "amenities")] %>%
+  mutate(amenities=as.character(amenities)) %>%
+  unnest_tokens(word, amenities) %>%
+  anti_join(stop_words)
+
+amenities.number <- as.data.frame(table(amenities.df$word))
+
+colnames(amenities.number) <- c("amenities", "frequency")
+amenities <- c("detector", "internet","dryer","tv","essentials", "conditioning","extinguisher","pets", "elevator","parking","microwave", "coffee","refrigerator","dishwasher","gym","breakfast","balcony","pool","bbq","garden")
+amenities
+
+amenities.df <-amenities.df %>%
+  filter(word %in% amenities) %>%
+  group_by(property_id) %>%
+  summarize(num_amenities = n())
+
+listing.df <- inner_join(listing.df, amenities.df)
+listing.df <- listing.df[,!colnames(listing.df) %in% c("amenities")]
+  
+```
+
+
+
+
+* 2. Correlation between numerical data
+
+```{r,warning=FALSE,message=FALSE,error=FALSE}
+# correlation of the numerical data
+listing.df <- listing.df[,!colnames(listing.df) %in% c("price")]
+
+ggcorr(listing.df[,-1],
+       label = TRUE,
+       label_size = 3,
+       layout.exp = 5,
+       hjust = 1)
+
+
+```
+
+First, we decided to remove maximum and minimum nights because it has zero relationship with price categories. Here, we can also get a sense that setting the policies on length of stay may not affect the price.
+
+Second, three sets of high-correlation variables can be easily detected. The first set is the series of “review_scores”  and mean_score, the second set is the series of “availability” variables and the third one is “accommodates”, “bathrooms” and “bedrooms”. To avoid the high correlation in input variables and overfitting, our group decided to conduct Principal Component Analysis on these three sets of data.
+
+
+
+
+
+# Part E. Unsupervised learning for dimension reduction
+
+* Performed PCA for highly correlated numerical data
+
+* 1. Review Scores
+
+We used the first two principal components that captures over 95% of the variation in the data.
+
+```{r, error=FALSE,message=FALSE,warning=FALSE}
+# extract review variables
+colnames(listing.df)
+
+review_var <- c("review_scores_value", 
+                "review_scores_location",
+                "review_scores_communication",
+                "review_scores_checkin",
+                "review_scores_cleanliness",
+                "review_scores_accuracy",
+                "review_scores_rating",
+                "mean_score")
+
+review.pca <- listing.df[,colnames(listing.df) %in% c("property_id",review_var)]
+
+
+# PCA for review data
+review.pcs <- prcomp(review.pca[, -1])
+summary(review.pcs)
+
+review.pca <- review.pca[, 1] %>%
+  cbind(review.pcs$x[,1:2])
+
+colnames(review.pca)[2:3] <- c("review_PC1","review_PC2")
+
+
+airbnb.df <- inner_join(listing.df, review.pca)
+
+
+
+
+
+```
+
+
+
+* 2. Availabilities
+
+We selected the first principal component that captures over 90% of the variation.
+
+```{r,error=FALSE,message=FALSE,warning=FALSE}
+
+avai_var <- c("availability_30", "availability_60","availability_90","availability_365")
+avai.pca <- listing.df[,colnames(listing.df) %in% c("property_id",avai_var)]
+
+
+# PCA for availability data
+avai.pcs <- prcomp(avai.pca[, -1])
+summary(avai.pcs)
+
+avai.pca <- avai.pca[, 1] %>%
+  cbind(avai.pcs$x[,1])
+
+colnames(avai.pca)[2] <- c("availability_PC1")
+
+airbnb.df <- inner_join(airbnb.df, avai.pca)
+```
+
+
+
+
+* 3. Accommodates, bathrooms and bedrooms
+
+Our group selected the first principal components which contributes over 90% to variation.
+
+```{r,error=FALSE,message=FALSE,warning=FALSE}
+acco_var <- c("accommodates", "bathrooms","bedrooms")
+
+acco.pca <- listing.df[,colnames(listing.df) %in% c("property_id",acco_var)]
+
+# PCA for availability data
+acco.pcs <- prcomp(acco.pca[, -1])
+summary(acco.pcs)
+acco.pca <- acco.pca[, 1] %>%
+  cbind(acco.pcs$x[,1])
+colnames(acco.pca)[2] <- c("accommodates_PC1")
+airbnb.df <- inner_join(airbnb.df, acco.pca)
+
+
+```
+
+
+
+* 4. Remove uncorrelated data
+
+```{r}
+remove_var <- c("zipcode","minimum_nights","maximum_nights")
+
+airbnb.df <- airbnb.df[, !colnames(airbnb.df) %in% c(remove_var,acco_var,avai_var,review_var)]
+
+write.csv(airbnb.df,file = "C:/Users/danni/Desktop/My R Work/BUS212/Data/airbnb_listing.csv")
+
+```
+
+After we finished cleaning data, we derived a new dataset that we found was efficient and useful names airbnb_listing.csv.Please refer to Appendix to find the variable dictionary.
+
+
+# Part F. Using Supervised Learning to build models
+
+* Modelling Strategies
+
+
+With a efficient and complete new dataset, models could be trained and tested. After trying several models, our groups ruled out Regression, Naive Bayes and KNN model. The target variable we studied in the projects was price category, so it would be inappropriate to use regression. Additionally, our input variables were mixed with categorical data and numerical data. As we discussed before, variables like room type and cancellation policies accounted for price level, and easily convert them into numbers made no sense. We cannot explain what is the meaning of  an increase in room type or in location. It would be the same for numerical data, which is also hard to convert. Since KNN model requires all numerical inputs and Naive Bayes require all categorical data, our group mainly focused on different type of classification trees.
+
+To avoid overfitting, we set some parameters in the trees. In the Best Pruned Tree, we set the cp as 0.00003 and used cross validation to prune the tree. In both Boosted tree and Bagged tree, we set the parameter “mfinal” as 20,  controlling the number of iterations for which tree was run or the number of trees to use. As for Random Forest, we set the “ntree” as 1000.
+
+We partitioned our data into a training set (70%) and validation set (30%). We used training set to train the mode and the validation set to test and compare models.
+
+
+
+* Model 1 - Best Pruned Classification Tree
+
+```{r, error=FALSE,message=FALSE,warning=FALSE}
+
+#listing.df <- read.csv("C:/Users/chris/Desktop/BigDataII/Final Project/dataset/newairbnb.csv")
+#listing.df <- read.csv("C:/Users/chris/Desktop/BigDataII/Final Project/dataset/airbnb_listing.csv")
+# read in new data
+listing.df <- read.csv("C:/Users/danni/Desktop/My R Work/BUS212/Data/airbnb_listing.csv")
+listing.df <- listing.df[,-c(1,2)]
+
+
+
+#Partition Data
+set.seed(100)
+
+train.index <- sample(c(1:dim(listing.df)[1]),dim(listing.df)[1]*0.7)
+train.df <- listing.df[train.index,]
+valid.df <- listing.df[-train.index,]
+
+#Decision tree
+train.df.mod <- train.df
+
+train.df.mod$price_category <-  as.factor(train.df.mod$price_category)
+
+#Class Tree
+class.tree <- rpart(price_category~ ., data=train.df.mod,
+                    method="class", minsplit=10, maxdepth=5,cp=0.00003)
+
+#Cross Validation
+cv.ct <- rpart(price_category ~., data=train.df.mod,method="class",
+               cp=0.00001, minsplit=4, maxdepth=5,xval=5)
+printcp(cv.ct)
+
+#Pruned by lower cp
+pruned.ct <- prune(cv.ct,
+                   cp= cv.ct$cptable[which.min(cv.ct$cptable[,"xerror"]),
+                                     "CP"])
+
+#Confusion Matrix
+price.valid <- predict(pruned.ct, valid.df,type="class")
+confusionMatrix(price.valid,valid.df$price_category)
+
+
+```
+
+The best pruned tree through cross validation gave an accuracy 46.31% in validation data. Looking at sensitivity, we found out that the tree does a good job in predicting price_categogry 1 (listings below 80) for validation data with an sensitivity of 89.84%. We believed that it is because for listings below $80, pricing can be explained by the data we have. The model performed very poor in the second category with only 15.05% sensitivity. Most of the airbnb was underestimated by using our model in validation data. 
+
+* Model 2 - Boosted Tree
+
+```{r,error=FALSE,message=FALSE,warning=FALSE}
+#Boosted Trees
+set.seed(100)
+boost.tree <- boosting(price_category ~ ., data=train.df.mod, mfinal=20)
+#importance of variables
+sort(boost.tree$importance)
+class.boost.valid <- predict(boost.tree,valid.df,type="class")
+#Confusion Matrix
+confusionMatrix(class.boost.valid$class,valid.df$price_category)
+
+```
+
+
+In boosted trees, we found out that among all variables we chose, Room_type and  neighbourhood_cleansed ranked the highest in the importance of affecting price_category.  That is saying, for airbnb pricing, location and room type (private room or entire home) are the most two powerful factors.
+
+In the validation data, boosted tree gave an accuracy of 48.38%, showing little improvement compared to the best pruned tree. Again, the model still performed bad in the second price category. 
+
+
+* Model 3 - Bagged Tree
+```{r,error=FALSE,message=FALSE,warning=FALSE}
+set.seed(100) 
+bagged.tree <- bagging(formula = price_category ~ ., data = train.df.mod, coob = TRUE,mfinal = 20) 
+sort(bagged.tree$importance)
+
+class.bag.valid <- predict(bagged.tree, valid.df, type = "class") 
+confusionMatrix(class.bag.valid$class, valid.df$price_category)
+```
+
+In our bagged trees, room type and neighbourhood also ranked the highest in the variable importance. The overall accuracy was 47.75%. We still found the unbalanced predictability in different price levels(especially low predictability in second and fifth category). Except for the first category, prices would be predicted over a larger range than we expected. For example, for the airbnb whose price should be in the third price category, the model assigned it possibly to the second or fourth category. It meant that our input variables cannot separate the price categories clearly and the accuracy was always not high.
+ 
+Random Forest is our best model based on the highest overall accuracy and a more balanced sensitivity in different categories. It would be well explained in the next part.
+
+
+# Part G. Best Model -Random Forest
+
+```{r,error=FALSE,message=FALSE,warning=FALSE}
+set.seed(100) 
+rf <- randomForest(price_category~ ., 
+                   data = train.df.mod, 
+                   ntree = 1000,
+                   mtry = 3, 
+                   nodesize = 5, 
+                   importance = TRUE)
+
+# variable importance plot 
+varImpPlot(rf, type = 1,main = "Random Forest Model")
+
+# Confusion Matrix
+rf.valid <- predict(rf, valid.df) 
+confusionMatrix(rf.valid, valid.df$price_category)
+
+
+
+```
+
+* Variable Importance
+In Random Forest, we plot the variable importance of the 12 variables and we get the following importance ranking. 
+
+Room_type has the highest importance - we have also seen in the box plot that there is a clear demarcation with the boxplot of different room types and hence this comes across as an important factor for price prediction.
+ 
+Neighbourhood_cleansed is the 2nd important  variable which basically influences the price of an airbnb listing basis the locality ( this means if the neighbourhood is posh then the price is higher as compared to lower income neighbourhood).
+
+accommodates_PC1 is the 3rd important variable which depicts the importance of accommodates , basically how many people can be accommodated, this is a concern for people who travel with large families and need a bigger accommodation and since they would like a large place this can be a factor for price determination.
+
+availability_PC1 is the 4th important variable which takes into account the 4 availability variable of 30,60 , 90 and 365 days and together this variable is an important factor for price determination.
+
+Restaurants is the 5th important variable, this has been taken from an external data source( boston gov ) and this shows how many eating places are actively operating around the listed property.
+
+Num_amenities is the 6th most important variable , this has been explained in the data preparation section , as this takes care of the most important amenities listed and then takes a summation of them , this is important for price determination as higher the number of amenities , higher can be the price listed for the airbnb.
+
+Review_frequency is the 7th most important variable, this shows the number of times the place has been reviewed, if the reviews are more and positive the lister can actually increase the price of the listed property.
+
+Property_type is the 8th important variable which shows that the property type of - apartment , garden apartment etc. which is a factor for price determination.
+
+Cancellation_policy is the 9th most important variable which is not a very important factor but it takes into factor the kind of cancellation which the property follows.
+
+review_PC1 and reveiw_PC2 are the 10th and 11th variables on the plot, as thought and discussed as a team we had assumed reviews will be the most important factor for airbnb pricing but the models have proved otherwise.
+
+The importance of Room Type, Neighbourhood and accommodates principal components still ranked high. The variable we created also contributed a lot, for example the restaurants, number of amenities and review frequency. Surprisingly, the two principal components extracted from a series of review scores had the lowest importance in our model. 
+
+* Model Performance
+The random forest model had the overall accuracy of 53.15% in validation data and the sensitivity of second price category increased to 31.01%. The sensitivities from class three to five were around 45% and for class 6 was 30%. This is the best model we had and the prediction capabilities were more balanced. Additionally, Class 1 still outperformed other classes with an sensitivity of 86.56%.
+
+* Key Findings
+ Our best model had some capabilities to forecast the price of airbnb per night given the information from airbnb, reviews and the restaurants in the neighbourhood. However, the model did not perform equally over different categories. It performed very well in the first price category from zero to eighty dollars. Over the remained five categories, it only gave the sensitivity around 30% to 40%. We found that Room Type, Neighbourhood and accommodates were the most three important factor in pricing decision and the scores of review did not appear to matter in a way we have expected.
+
+
+# Part H. Conclusion & Learnings
+
+When we started this project we as a team had a perspective that reviews and the review frequency will be one of the most significant factor for price determination.Through our way in the project at each step we realised that for people who book airbnb the factor of reviews has a very small correlation and people care about other factors.  Although our models only had 53.51% over accuracy in the validation data, we are able to identify the most influential factors of airbnb pricing. The top 3 factors are room_type, neighbourhood, and accommodates. Our findings suggest that airbnb.com should pay more attention to listing properties’ room_type, location and accommodate ability when evaluating their pricing for the new places as customers care about the above three more than the listing place having good reviews.
+Hence for new listers airbnb.com can have a note saying price for the place should be basis the room_type, the location and  the accommodate.
+
+We also noticed that all models performed relatively well in class 1 (price category that under $80), which are properties that are priced under $80. This fact implies that airbnb customers who are looking for accommodation under $80 care much more about room_type, neighbourhood and accommodates than other customers do. In the perspective of airbnb, they should look into these aspects and improve the attractiveness of listing properties which have low cost and see what type of rooms are preferred by low cost travellers for their future analysis.
+
+For the other 5 price categories, our models did not fit well, which means that for properties that are priced higher, room_type, location and accommodate ability do not have much influence on its pricing. At least, to explain properties that are priced over $80, we need to find other datasets to study. Our team had a in-depth discussion over this issue, and we came up with some ideas that might be useful to solve this problem. 
+
+First of all, demand and supply are two major forces that drive prices. Since we already have availability (which is the measure of supply), if we are able to access data of how many times the properties are being booked or being searched within a particular time, we would have better understanding of the demand of properties as well as their pricing strategies.
+Also, according to our own experience, properties that are newly-decorated or have fancy appearance would be priced higher. To explain how decoration and amenities affect pricing, we want to find data about whether properties are newly decorated and the years those properties are being built. These information would be good indicators about the quality of properties and might be good factors that determining prices.
+
+
+* Final conclusion
+At the very beginning our team thought we have too much data and we need to get rid of part of it. As we studied variables and trying to model pricing, we found that pricing dynamic is more complicated than we expected. Our data is only capable of explaining some part of pricing dynamic, but not all of it. We realized that to completely understand pricing of airbnb, we need more data --- especially organized and correlated data, and more provoking thoughts which can be something like the strategy of the lister to price the place  - like for example which amenity adds what price to the total price of the place like if the place has WiFi then the lister can charge $20 more on the listed property etc. , also are there things which reduce the price like a rat in the kitchen or a review of unclean bathroom .There can be an interesting model around the same to determine price which can actually be an automated model for airbnb and like a stock market tracker this can show how price behaves everyday.
+
+
+
+
+# Appendix - Variable Dictionary
+Below is short explanation about the variables in airbnb_listing.csv.
+
+1.  "property_id"  : unique id for each property.
+        
+2.  "review_frequency" : count of reviews in each listing property.
+  
+3.  "Neighbourhood_cleansed": neighbourhood that each listing property locates
+
+4.  "Property_type": indicates the property is “apartment”, “guesthouse”, “condo” or other property type.  
+        
+5.  "room_type" : indicates the property is “entire house”, private room” or “shared room”.
+
+6.  "cancellation_policy" : indicates the cancellation policy is “strict, “super strict”, “moderate” or “flexible”; 
+
+7.  "Restaurants" : number of restaurants within the neighborhood of property;
+
+8.  "price_category" : listing price ranges from class 1 to 6, while class 1 represents price range from $0 to $80, class 2 represents price range from $80 to $120, class 3 represents price range from $120 to $160, class 4 represents price range from $160 to $200, class 5 represents price range from $200 to $300 and class 6 represents price range from $300 to $500.
+
+9.  "num_amenities" : indicates the number of amenities provided in listing property;
+
+10. "review_PC1": indicates review scores of each listing property after PCA analysis; 
+
+11.  "review_PC2": indicates review scores of each listing property after PCA analysis;
+ 
+12. "availability_PC1" : indicates availability of each listing property after PCA analysis;
+   
+13. "accommodates_PC1": indicates accommodates ability of each listing property after PCA analysis.
+
+
